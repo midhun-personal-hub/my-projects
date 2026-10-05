@@ -1,0 +1,33 @@
+# Android Build Artifacts & Binaries
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+*.zip
+*.tar
+*.gz
+*.rar
+
+# Android Studio & Gradle
+*.iml
+.gradle
+.kotlin
+/local.properties
+local.properties
+/.idea/
+.DS_Store
+/build
+/app/build
+/captures
+.externalNativeBuild
+.cxx
+.env
+debug.keystore
+*.jks
+*.keystore
+
+# Backend
+backend/node_modules/
+backend/dist/
+backend/.env

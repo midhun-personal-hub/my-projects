@@ -1,0 +1,757 @@
+package com.example.watchtogether.ui
+
+import android.app.Application
+import android.util.Log
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.example.data.local.player.VideoPlayer
+import com.example.domain.model.PlayerError
+import com.example.watchtogether.model.ConnectionState
+import com.example.watchtogether.model.RoomRole
+import com.example.watchtogether.model.RoomSession
+import com.example.watchtogether.model.RoomState
+import com.example.watchtogether.model.RoomUiState
+import com.example.watchtogether.model.SyncUiState
+import com.example.watchtogether.model.VideoReadinessState
+import com.example.watchtogether.playback.ExistingPlayerAdapter
+import com.example.watchtogether.room.RoomRepository
+import com.example.watchtogether.signaling.SignalingClient
+import com.example.watchtogether.signaling.SignalingListener
+import com.example.watchtogether.signaling.SignalingMessage
+import com.example.watchtogether.sync.PlaybackSyncManager
+import com.example.watchtogether.transfer.FileTransferListener
+import com.example.watchtogether.transfer.FileTransferManager
+import com.example.watchtogether.transfer.LocalMediaServer
+import com.example.watchtogether.webrtc.WebRtcListener
+import com.example.watchtogether.webrtc.WebRtcManager
+import com.example.watchtogether.webrtc.WebRtcManagerImpl
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+
+class WatchTogetherViewModel(
+    application: Application,
+    private val roomRepository: RoomRepository,
+    val signalingClient: SignalingClient,
+    val videoPlayer: VideoPlayer
+) : AndroidViewModel(application), SignalingListener, WebRtcListener {
+
+    companion object {
+        private const val TAG = "WatchTogetherVM"
+    }
+
+    private val playerAdapter = ExistingPlayerAdapter(videoPlayer)
+    val syncManager = PlaybackSyncManager(signalingClient, playerAdapter)
+    val webRtcManager: WebRtcManager = WebRtcManagerImpl(application, signalingClient)
+    val fileTransferManager = FileTransferManager(application, signalingClient)
+    val localMediaServer = LocalMediaServer(application)
+
+    private val _uiState = MutableStateFlow(RoomUiState())
+    val uiState: StateFlow<RoomUiState> = _uiState.asStateFlow()
+
+    val syncState: StateFlow<SyncUiState> = syncManager.syncState
+
+    init {
+        signalingClient.addListener(this)
+        webRtcManager.setListener(this)
+
+        fileTransferManager.setListener(object : FileTransferListener {
+            override fun onTransferProgress(progress: Float, statusText: String) {
+                _uiState.update {
+                    it.copy(
+                        isTransferring = progress < 1f,
+                        transferProgress = progress,
+                        transferStatusText = statusText
+                    )
+                }
+            }
+
+            override fun onFileReceived(localUri: android.net.Uri, fileName: String, mimeType: String) {
+                _uiState.update {
+                    it.copy(
+                        mediaTitle = fileName,
+                        mediaUri = localUri.toString(),
+                        isTransferring = false,
+                        transferProgress = 1f,
+                        transferStatusText = "Video ready",
+                        videoState = VideoReadinessState.VIDEO_LOADING,
+                        errorMessage = null
+                    )
+                }
+                syncManager.setVideoLoading()
+                Log.d("VIEWER", "Setting video source: $localUri")
+                videoPlayer.setMedia(localUri, fileName, 0L)
+                syncManager.requestSync()
+            }
+
+            override fun onError(error: String) {
+                Log.e("TRANSFER ERROR", error)
+                _uiState.update {
+                    it.copy(
+                        isTransferring = false,
+                        errorMessage = error
+                    )
+                }
+            }
+        })
+
+        viewModelScope.launch {
+            signalingClient.connectionState.collect { connState ->
+                _uiState.update { it.copy(connectionState = connState) }
+            }
+        }
+
+        var lastIsPlaying = false
+        var lastPositionMs = 0L
+        viewModelScope.launch {
+            videoPlayer.state.collect { playerState ->
+                if (playerState.error != null) {
+                    val currentUri = _uiState.value.mediaUri ?: ""
+                    // If direct HTTP stream from host failed (e.g. devices on different networks), fall back to chunk transfer
+                    if (_uiState.value.role == RoomRole.VIEWER && currentUri.startsWith("http://") && !currentUri.contains("w3.org") && !_uiState.value.isTransferring) {
+                        Log.d("VIEWER", "Direct HTTP stream unreachable, falling back to chunk transfer")
+                        _uiState.update {
+                            it.copy(
+                                isTransferring = true,
+                                transferProgress = 0f,
+                                transferStatusText = "Requesting video from host...",
+                                errorMessage = null
+                            )
+                        }
+                        val roomCode = _uiState.value.roomCode
+                        if (roomCode != null) {
+                            signalingClient.send(SignalingMessage.createRequestFile(roomCode))
+                        }
+                        return@collect
+                    }
+
+                    val errMsg = when (val err = playerState.error) {
+                        is PlayerError.CorruptedFile -> "Cannot play video: format or stream unsupported."
+                        is PlayerError.MissingFile -> "Video file not found or inaccessible."
+                        is PlayerError.UnsupportedCodec -> "Unsupported video codec on this device."
+                        is PlayerError.DecoderError -> "Hardware decoder error."
+                        is PlayerError.Unknown -> "Video playback error: ${err.message}"
+                        else -> "Video playback error occurred."
+                    }
+                    _uiState.update {
+                        it.copy(
+                            errorMessage = errMsg,
+                            videoState = VideoReadinessState.NO_SOURCE
+                        )
+                    }
+                }
+
+                val state = _uiState.value
+                val isReady = !playerState.isLoading && playerState.durationMs > 0
+
+                if (isReady && !syncManager.isVideoReady()) {
+                    Log.d("VIEWER", "loadedmetadata")
+                    Log.d("VIEWER", "VIDEO_READY")
+                    syncManager.onVideoReady()
+                    _uiState.update { it.copy(videoState = VideoReadinessState.VIDEO_READY, errorMessage = null) }
+                }
+
+                if (state.roomState == RoomState.ACTIVE && isReady) {
+                    if (!syncManager.isRemoteUpdate && !syncManager.isInitializingVideo) {
+                        if (playerState.isPlaying != lastIsPlaying) {
+                            lastIsPlaying = playerState.isPlaying
+                            if (playerState.isPlaying) {
+                                syncManager.onLocalPlay()
+                            } else {
+                                syncManager.onLocalPause()
+                            }
+                        }
+
+                        if (kotlin.math.abs(playerState.positionMs - lastPositionMs) > 1500L) {
+                            syncManager.onLocalSeek(playerState.positionMs)
+                        }
+                    } else {
+                        lastIsPlaying = playerState.isPlaying
+                    }
+                    lastPositionMs = playerState.positionMs
+                } else {
+                    lastIsPlaying = playerState.isPlaying
+                    lastPositionMs = playerState.positionMs
+                }
+            }
+        }
+    }
+
+    fun createRoom(onSuccess: ((String) -> Unit)? = null) {
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    roomState = RoomState.WAITING,
+                    connectionState = ConnectionState.CONNECTING,
+                    role = RoomRole.HOST,
+                    currentSession = RoomSession(roomCode = "", role = RoomRole.HOST),
+                    errorMessage = null
+                )
+            }
+
+            val result = roomRepository.createRoom()
+            result.onSuccess { response ->
+                val code = response.roomCode
+                val session = RoomSession(
+                    roomCode = code,
+                    role = RoomRole.HOST,
+                    roomId = response.roomId,
+                    expiresAt = response.expiresAt
+                )
+                _uiState.update {
+                    it.copy(
+                        roomCode = code,
+                        role = RoomRole.HOST,
+                        currentSession = session,
+                        roomState = RoomState.WAITING
+                    )
+                }
+                webRtcManager.setRole(RoomRole.HOST)
+                fileTransferManager.start(code, RoomRole.HOST)
+                signalingClient.connect(code, RoomRole.HOST)
+                syncManager.start(code, RoomRole.HOST)
+                onSuccess?.invoke(code)
+            }.onFailure { error ->
+                _uiState.update {
+                    it.copy(
+                        roomState = RoomState.IDLE,
+                        connectionState = ConnectionState.FAILED,
+                        errorMessage = error.localizedMessage ?: "Failed to create room"
+                    )
+                }
+            }
+        }
+    }
+
+    fun joinRoom(code: String, onSuccess: ((String) -> Unit)? = null) {
+        val normalized = code.trim().uppercase()
+        if (normalized.length != 6) {
+            _uiState.update { it.copy(errorMessage = "Enter a valid 6-character room code") }
+            return
+        }
+
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    roomState = RoomState.WAITING,
+                    connectionState = ConnectionState.CONNECTING,
+                    role = RoomRole.VIEWER,
+                    currentSession = RoomSession(roomCode = normalized, role = RoomRole.VIEWER),
+                    errorMessage = null
+                )
+            }
+
+            val result = roomRepository.joinRoom(normalized)
+            result.onSuccess { response ->
+                val session = RoomSession(
+                    roomCode = normalized,
+                    role = RoomRole.VIEWER,
+                    roomId = response.roomId,
+                    expiresAt = response.expiresAt
+                )
+                _uiState.update {
+                    it.copy(
+                        roomCode = normalized,
+                        role = RoomRole.VIEWER,
+                        currentSession = session,
+                        roomState = RoomState.WAITING
+                    )
+                }
+                webRtcManager.setRole(RoomRole.VIEWER)
+                fileTransferManager.start(normalized, RoomRole.VIEWER)
+                signalingClient.connect(normalized, RoomRole.VIEWER)
+                syncManager.start(normalized, RoomRole.VIEWER)
+                onSuccess?.invoke(normalized)
+            }.onFailure { error ->
+                _uiState.update {
+                    it.copy(
+                        roomState = RoomState.IDLE,
+                        connectionState = ConnectionState.FAILED,
+                        errorMessage = error.localizedMessage ?: "Failed to join room"
+                    )
+                }
+            }
+        }
+    }
+
+    fun ensureSession(roomCode: String, role: RoomRole) {
+        val current = _uiState.value
+        if (current.roomCode != roomCode || current.role != role) {
+            val session = RoomSession(roomCode = roomCode, role = role)
+            _uiState.update {
+                it.copy(
+                    roomCode = roomCode,
+                    role = role,
+                    currentSession = session
+                )
+            }
+            webRtcManager.setRole(role)
+            fileTransferManager.start(roomCode, role)
+            signalingClient.connect(roomCode, role)
+            syncManager.start(roomCode, role)
+        }
+    }
+
+    fun leaveRoom() {
+        val code = _uiState.value.roomCode
+        localMediaServer.stop()
+        fileTransferManager.stop()
+        syncManager.stop()
+        webRtcManager.close()
+        signalingClient.disconnect()
+
+        if (code != null) {
+            viewModelScope.launch {
+                roomRepository.leaveRoom(code)
+            }
+        }
+
+        _uiState.update {
+            RoomUiState(
+                roomState = RoomState.IDLE,
+                connectionState = ConnectionState.DISCONNECTED
+            )
+        }
+    }
+
+    fun clearError() {
+        _uiState.update { it.copy(errorMessage = null) }
+    }
+
+    // Host Media Notification
+    fun notifyMediaSelected(title: String, durationMs: Long, uri: String? = null) {
+        val roomCode = _uiState.value.roomCode ?: ""
+        var broadcastUri = uri
+        if (uri != null) {
+            val parsedUri = android.net.Uri.parse(uri)
+            if (!uri.startsWith("http://") && !uri.startsWith("https://") && !uri.startsWith("android.resource://")) {
+                fileTransferManager.setHostLocalMedia(parsedUri, title, durationMs)
+                val meta = fileTransferManager.getHostMediaMetadata()
+                val mimeType = meta["mimeType"] as? String ?: "video/mp4"
+                val fileSize = meta["fileSize"] as? Long ?: 0L
+                val localStreamUrl = localMediaServer.start(parsedUri, mimeType, fileSize)
+                if (localStreamUrl != null) {
+                    Log.d("HOST", "Local HTTP stream available at: $localStreamUrl")
+                    broadcastUri = localStreamUrl
+                }
+            }
+        }
+
+        val mimeType: String
+        val fileSize: Long
+        if (uri != null && uri.startsWith("android.resource://")) {
+            mimeType = "video/mp4"
+            fileSize = 1005568L // Actual downloaded demo_video.mp4 size (~982 KB)
+        } else {
+            val meta = fileTransferManager.getHostMediaMetadata()
+            mimeType = meta["mimeType"] as? String ?: "video/mp4"
+            fileSize = meta["fileSize"] as? Long ?: 0L
+        }
+
+        _uiState.update {
+            it.copy(
+                mediaTitle = title,
+                mediaDurationMs = durationMs,
+                mediaUri = uri,
+                roomState = RoomState.ACTIVE,
+                videoState = VideoReadinessState.VIDEO_READY
+            )
+        }
+        val msg = SignalingMessage.createMediaStarted(
+            roomCode = roomCode,
+            name = title,
+            durationMs = durationMs,
+            uri = broadcastUri,
+            mimeType = mimeType,
+            fileSize = fileSize
+        )
+        signalingClient.send(msg)
+        syncManager.onHostMediaStarted(title, durationMs, uri)
+        webRtcManager.setVideoSource("Local Media: $title")
+
+        // If viewer is already connected and no local HTTP server could be started, initiate chunk transfer
+        if (_uiState.value.participantConnected && uri != null && !uri.startsWith("http://") && !uri.startsWith("https://") && !uri.startsWith("android.resource://") && broadcastUri == uri) {
+            fileTransferManager.startHostFileTransfer(roomCode)
+        }
+    }
+
+    // Bidirectional User Playback Actions (Host and Viewer)
+    fun onUserPlay() {
+        Log.d("[SYNC]", "Local PLAY")
+        try {
+            videoPlayer.play()
+            Log.d("[VIDEO]", "play() succeeded")
+        } catch (e: Exception) {
+            Log.e("[VIDEO]", "play() rejected", e)
+        }
+        syncManager.onLocalPlay()
+    }
+
+    fun onUserPause() {
+        Log.d("[SYNC]", "Local PAUSE")
+        videoPlayer.pause()
+        syncManager.onLocalPause()
+    }
+
+    fun onUserTogglePlayPause() {
+        if (videoPlayer.state.value.isPlaying) {
+            onUserPause()
+        } else {
+            onUserPlay()
+        }
+    }
+
+    fun onUserSeek(targetPositionMs: Long) {
+        videoPlayer.seekTo(targetPositionMs)
+        syncManager.onLocalSeek(targetPositionMs)
+    }
+
+    fun onUserRewind10s() {
+        val current = videoPlayer.state.value.positionMs
+        val target = (current - 10000L).coerceAtLeast(0L)
+        onUserSeek(target)
+    }
+
+    fun onUserForward10s() {
+        val current = videoPlayer.state.value.positionMs
+        val duration = videoPlayer.state.value.durationMs
+        val target = if (duration > 0) (current + 10000L).coerceAtMost(duration) else current + 10000L
+        onUserSeek(target)
+    }
+
+    // SignalingListener Implementation
+    override fun onConnected() {
+        Log.d(TAG, "Signaling connected for ${_uiState.value.roomCode}")
+        val role = _uiState.value.role
+        val roomCode = _uiState.value.roomCode ?: return
+
+        // If host, prepare WebRTC offer for viewer
+        if (role == RoomRole.HOST && _uiState.value.participantConnected) {
+            webRtcManager.createOffer(roomCode)
+        }
+
+        // Reconnection / connection sync request
+        if (role == RoomRole.VIEWER) {
+            if (syncManager.isVideoReady()) {
+                syncManager.requestSync()
+            } else {
+                Log.d(TAG, "[VIEWER] Requesting current media state on connect/reconnect")
+                signalingClient.send(SignalingMessage.createRequestMedia(roomCode))
+            }
+        }
+    }
+
+    override fun onDisconnected(reason: String) {
+        Log.d(TAG, "Signaling disconnected: $reason")
+    }
+
+    override fun onMessageReceived(message: SignalingMessage) {
+        val roomCode = _uiState.value.roomCode ?: return
+
+        // Pass all signaling messages to FileTransferManager
+        fileTransferManager.handleSignalingMessage(message)
+
+        when (message.type) {
+            SignalingMessage.TYPE_REQUEST_FILE -> {
+                if (_uiState.value.role == RoomRole.HOST) {
+                    Log.d(TAG, "[HOST] Viewer requested video file transfer. Starting transfer...")
+                    fileTransferManager.startHostFileTransfer(roomCode)
+                }
+            }
+
+            SignalingMessage.TYPE_REQUEST_MEDIA -> {
+                if (_uiState.value.role == RoomRole.HOST) {
+                    val mediaUri = _uiState.value.mediaUri
+                    val title = _uiState.value.mediaTitle
+                    if (!mediaUri.isNullOrEmpty() && !title.isNullOrEmpty()) {
+                        Log.d(TAG, "[HOST] Responding to REQUEST_MEDIA with $title")
+                        val meta = fileTransferManager.getHostMediaMetadata()
+                        val mimeType = meta["mimeType"] as? String ?: "video/mp4"
+                        val fileSize = meta["fileSize"] as? Long ?: 0L
+                        val duration = _uiState.value.mediaDurationMs
+                        val broadcastUri = localMediaServer.getStreamUrl() ?: mediaUri
+                        val msg = SignalingMessage.createMediaStarted(
+                            roomCode = roomCode,
+                            name = title,
+                            durationMs = duration,
+                            uri = broadcastUri,
+                            mimeType = mimeType,
+                            fileSize = fileSize
+                        )
+                        signalingClient.send(msg)
+                    }
+                }
+            }
+
+            SignalingMessage.TYPE_ROOM_JOINED -> {
+                val participants = message.payload.optInt("participantCount", 1)
+                _uiState.update {
+                    it.copy(
+                        participantConnected = participants >= 2,
+                        roomState = if (participants >= 2) RoomState.CONNECTED else RoomState.WAITING
+                    )
+                }
+
+                val mediaInfo = message.payload.optJSONObject("mediaInfo")
+                if (mediaInfo != null) {
+                    val name = mediaInfo.optString("name")
+                    val duration = mediaInfo.optLong("durationMs", 0L)
+                    val uri = mediaInfo.optString("uri", "")
+                    if (name.isNotEmpty()) {
+                        _uiState.update {
+                            it.copy(
+                                mediaTitle = name,
+                                mediaDurationMs = duration,
+                                mediaUri = uri.ifEmpty { null },
+                                roomState = RoomState.ACTIVE
+                            )
+                        }
+                        if (_uiState.value.role == RoomRole.VIEWER) {
+                            loadViewerMedia(roomCode, name, uri)
+                        }
+                    }
+                }
+
+                if (participants >= 2 && _uiState.value.role == RoomRole.HOST) {
+                    webRtcManager.createOffer(roomCode)
+                }
+            }
+
+            SignalingMessage.TYPE_USER_JOINED -> {
+                Log.d(TAG, "Peer joined the room!")
+                _uiState.update {
+                    it.copy(
+                        participantConnected = true,
+                        roomState = RoomState.CONNECTED
+                    )
+                }
+                if (_uiState.value.role == RoomRole.HOST) {
+                    webRtcManager.createOffer(roomCode)
+                    val mediaUri = _uiState.value.mediaUri
+                    val title = _uiState.value.mediaTitle
+                    if (!mediaUri.isNullOrEmpty() && !title.isNullOrEmpty()) {
+                        val meta = fileTransferManager.getHostMediaMetadata()
+                        val mimeType = meta["mimeType"] as? String ?: "video/mp4"
+                        val fileSize = meta["fileSize"] as? Long ?: 0L
+                        val duration = _uiState.value.mediaDurationMs
+                        val broadcastUri = localMediaServer.getStreamUrl() ?: mediaUri
+                        val msg = SignalingMessage.createMediaStarted(
+                            roomCode = roomCode,
+                            name = title,
+                            durationMs = duration,
+                            uri = broadcastUri,
+                            mimeType = mimeType,
+                            fileSize = fileSize
+                        )
+                        signalingClient.send(msg)
+                    }
+                }
+            }
+
+            SignalingMessage.TYPE_USER_LEFT -> {
+                Log.d(TAG, "Peer left the room")
+                _uiState.update {
+                    it.copy(
+                        participantConnected = false,
+                        roomState = RoomState.WAITING
+                    )
+                }
+            }
+
+            SignalingMessage.TYPE_HOST_DISCONNECTED -> {
+                Log.d(TAG, "Host ended the session")
+                _uiState.update {
+                    it.copy(
+                        participantConnected = false,
+                        roomState = RoomState.DISCONNECTED,
+                        errorMessage = "Host ended the WatchTogether session."
+                    )
+                }
+            }
+
+            SignalingMessage.TYPE_WEBRTC_OFFER -> {
+                if (_uiState.value.role == RoomRole.VIEWER) {
+                    val sdp = message.payload.optString("sdp")
+                    webRtcManager.setRemoteDescription("offer", sdp)
+                    webRtcManager.createAnswer(roomCode)
+                } else {
+                    Log.d(TAG, "Host ignored incoming WEBRTC_OFFER")
+                }
+            }
+
+            SignalingMessage.TYPE_WEBRTC_ANSWER -> {
+                if (_uiState.value.role == RoomRole.HOST) {
+                    val sdp = message.payload.optString("sdp")
+                    webRtcManager.setRemoteDescription("answer", sdp)
+                } else {
+                    Log.d(TAG, "Viewer ignored incoming WEBRTC_ANSWER")
+                }
+            }
+
+            SignalingMessage.TYPE_ICE_CANDIDATE -> {
+                val candidate = message.payload.optString("candidate")
+                val sdpMid = message.payload.optString("sdpMid")
+                val sdpMLineIndex = message.payload.optInt("sdpMLineIndex", 0)
+                webRtcManager.addIceCandidate(candidate, sdpMid, sdpMLineIndex)
+            }
+
+            SignalingMessage.TYPE_PLAY,
+            SignalingMessage.TYPE_PAUSE,
+            SignalingMessage.TYPE_SEEK,
+            SignalingMessage.TYPE_SYNC,
+            SignalingMessage.TYPE_REQUEST_SYNC,
+            SignalingMessage.TYPE_MEDIA_STARTED -> {
+                syncManager.handleIncomingSignaling(message)
+                if (message.type == SignalingMessage.TYPE_MEDIA_STARTED) {
+                    val name = message.payload.optString("name")
+                    val duration = message.payload.optLong("durationMs", 0L)
+                    val uri = message.payload.optString("uri", "")
+                    _uiState.update {
+                        it.copy(
+                            mediaTitle = name,
+                            mediaDurationMs = duration,
+                            mediaUri = uri.ifEmpty { null },
+                            roomState = RoomState.ACTIVE
+                        )
+                    }
+                    if (_uiState.value.role == RoomRole.VIEWER) {
+                        loadViewerMedia(roomCode, name, uri)
+                    }
+                }
+            }
+
+            SignalingMessage.TYPE_ERROR -> {
+                val err = message.payload.optString("message", "Error from server")
+                _uiState.update { it.copy(errorMessage = err) }
+            }
+        }
+    }
+
+    private fun loadViewerMedia(roomCode: String, name: String, uri: String) {
+        syncManager.setVideoLoading()
+        if (uri.startsWith("android.resource://")) {
+            Log.d("VIEWER", "Setting built-in raw resource video source: $uri")
+            _uiState.update {
+                it.copy(
+                    mediaTitle = name,
+                    mediaUri = uri,
+                    isTransferring = false,
+                    transferProgress = 1f,
+                    transferStatusText = "Demo video ready",
+                    videoState = VideoReadinessState.VIDEO_LOADING,
+                    errorMessage = null
+                )
+            }
+            videoPlayer.setMedia(android.net.Uri.parse(uri), name, 0L)
+            syncManager.requestSync()
+            return
+        }
+
+        if (uri.startsWith("http://") || uri.startsWith("https://")) {
+            Log.d("VIEWER", "Setting video source: $uri")
+            _uiState.update {
+                it.copy(
+                    mediaTitle = name,
+                    mediaUri = uri,
+                    isTransferring = false,
+                    transferProgress = 1f,
+                    transferStatusText = "Streaming video",
+                    errorMessage = null
+                )
+            }
+            videoPlayer.setMedia(android.net.Uri.parse(uri), name, 0L)
+            syncManager.requestSync()
+        } else {
+            // Check if cached locally on this device/emulator first
+            val cached = fileTransferManager.getCachedSharedFile(roomCode)
+            if (cached != null && cached.exists() && cached.length() > 0L) {
+                Log.d("VIEWER", "Found cached local media file: ${cached.absolutePath}")
+                val localUri = android.net.Uri.fromFile(cached)
+                _uiState.update {
+                    it.copy(
+                        mediaTitle = name,
+                        mediaUri = localUri.toString(),
+                        isTransferring = false,
+                        transferProgress = 1f,
+                        transferStatusText = "Video ready",
+                        videoState = VideoReadinessState.VIDEO_LOADING,
+                        errorMessage = null
+                    )
+                }
+                videoPlayer.setMedia(localUri, name, 0L)
+                syncManager.requestSync()
+            } else {
+                Log.d("TRANSFER", "Requesting video file transfer from Host for $name")
+                _uiState.update {
+                    it.copy(
+                        isTransferring = true,
+                        transferProgress = 0f,
+                        transferStatusText = "Requesting video from host..."
+                    )
+                }
+                signalingClient.send(SignalingMessage.createRequestFile(roomCode))
+            }
+        }
+    }
+
+    fun onViewerSelectLocalMedia(uri: android.net.Uri, name: String) {
+        Log.d("VIEWER", "Viewer manually selected local video: $name")
+        fileTransferManager.cancelTransfer()
+        _uiState.update {
+            it.copy(
+                mediaTitle = name,
+                mediaUri = uri.toString(),
+                isTransferring = false,
+                transferProgress = 1f,
+                transferStatusText = "Local copy ready",
+                videoState = VideoReadinessState.VIDEO_LOADING,
+                errorMessage = null
+            )
+        }
+        syncManager.setVideoLoading()
+        videoPlayer.setMedia(uri, name, 0L)
+        syncManager.requestSync()
+    }
+
+    fun retryMediaRequest() {
+        val roomCode = _uiState.value.roomCode ?: return
+        Log.d("VIEWER", "Viewer retrying media request for room $roomCode")
+        _uiState.update { it.copy(errorMessage = null) }
+        val cached = fileTransferManager.getCachedSharedFile(roomCode)
+        if (cached != null && cached.exists() && cached.length() > 0L) {
+            val localUri = android.net.Uri.fromFile(cached)
+            videoPlayer.setMedia(localUri, _uiState.value.mediaTitle ?: "Movie", 0L)
+            syncManager.requestSync()
+        } else {
+            signalingClient.send(SignalingMessage.createRequestMedia(roomCode))
+            signalingClient.send(SignalingMessage.createRequestFile(roomCode))
+            syncManager.requestSync()
+        }
+    }
+
+    override fun onError(error: String) {
+        _uiState.update { it.copy(errorMessage = error) }
+    }
+
+    // WebRtcListener Implementation
+    override fun onIceConnectionState(state: String) {
+        Log.d(TAG, "ICE State: $state")
+    }
+
+    override fun onPeerConnected() {
+        Log.d(TAG, "WebRTC Peer successfully connected P2P!")
+    }
+
+    override fun onPeerDisconnected() {
+        Log.d(TAG, "WebRTC Peer disconnected")
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        signalingClient.removeListener(this)
+        webRtcManager.setListener(null)
+        leaveRoom()
+    }
+}

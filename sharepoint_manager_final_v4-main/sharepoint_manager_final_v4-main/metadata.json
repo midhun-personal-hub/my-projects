@@ -1,0 +1,6 @@
+{
+  "name": "SharePoint Management Platform",
+  "description": "Enterprise-grade, configuration-driven SharePoint List management platform with Microsoft Entra ID authentication and dynamic workspace CRUD controls.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

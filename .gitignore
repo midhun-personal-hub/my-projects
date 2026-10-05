@@ -1,0 +1,28 @@
+# Global Exclusions for Workspace
+*.zip
+*.apk
+*.aab
+*.tar
+*.gz
+*.rar
+*.git_backup
+.git_backup/
+
+# Node Dependencies & Build Output
+node_modules/
+dist/
+build/
+
+# Android & Gradle
+.gradle/
+local.properties
+*.iml
+.idea/
+
+# Environment Secrets
+.env
+.env.local
+
+# OS Metadata
+.DS_Store
+Thumbs.db

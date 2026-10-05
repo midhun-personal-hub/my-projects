@@ -1,0 +1,124 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  /* Color system design tokens - Light Mode */
+  --bg-base: #f8fafc;
+  --bg-surface: #ffffff;
+  --bg-surface-elevated: #f1f5f9;
+  --bg-surface-hover: #f1f5f9;
+  --bg-muted: #f8fafc;
+
+  --border-subtle: #f1f5f9;
+  --border-default: #e2e8f0;
+  --border-strong: #cbd5e1;
+
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #64748b;
+  --text-disabled: #94a3b8;
+
+  --accent-primary: #2563eb;
+  --accent-primary-hover: #1d4ed8;
+  --accent-text: #ffffff;
+  --accent-soft: #eff6ff;
+  --accent-border: #bfdbfe;
+
+  --table-header-bg: #f8fafc;
+  --table-sticky-header-bg: #f1f5f9;
+  --table-row-even: #ffffff;
+  --table-row-odd: #f8fafc;
+  --table-row-hover: #eff6ff;
+  --table-sticky-col-even: #ffffff;
+  --table-sticky-col-odd: #f8fafc;
+  --table-sticky-col-hover: #eff6ff;
+  --table-border: #e2e8f0;
+  --table-sticky-border: #cbd5e1;
+
+  --input-bg: #ffffff;
+  --input-border: #cbd5e1;
+  --input-text: #0f172a;
+  --input-placeholder: #94a3b8;
+  --input-focus-border: #3b82f6;
+
+  --modal-bg: #ffffff;
+  --modal-header-bg: #f8fafc;
+  --modal-footer-bg: #f8fafc;
+  --modal-border: #e2e8f0;
+  --modal-backdrop: rgba(15, 23, 42, 0.6);
+}
+
+.dark, [data-theme="dark"] {
+  /* Color system design tokens - Dark Mode (Comfortable near-black Slate palette) */
+  --bg-base: #0b1120;             /* Near-black deep slate (avoids pure #000 halation) */
+  --bg-surface: #131d2e;          /* One shade lighter for cards & main containers */
+  --bg-surface-elevated: #1b263b; /* Dropdowns, popups, headers */
+  --bg-surface-hover: #223048;    /* Clear interactive hover state */
+  --bg-muted: #172236;
+
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-default: rgba(255, 255, 255, 0.14);
+  --border-strong: rgba(255, 255, 255, 0.22);
+
+  --text-primary: #f1f5f9;        /* Soft off-white, eliminates eye-strain halation */
+  --text-secondary: #cbd5e1;      /* High-contrast readable secondary text */
+  --text-muted: #94a3b8;          /* Mid-gray helper text */
+  --text-disabled: #64748b;       /* Distinct disabled text */
+
+  --accent-primary: #3b82f6;      /* High visibility blue accent */
+  --accent-primary-hover: #60a5fa;
+  --accent-text: #ffffff;
+  --accent-soft: rgba(59, 130, 246, 0.15);
+  --accent-border: rgba(59, 130, 246, 0.35);
+
+  --table-header-bg: #131d2e;
+  --table-sticky-header-bg: #1c273c;   /* Distinguishable while scrolling */
+  --table-row-even: #111a29;           /* Table data row background */
+  --table-row-odd: #0d1420;            /* Subtle alternating row tint */
+  --table-row-hover: #192a45;          /* Crisp row hover without obscuring text */
+  --table-sticky-col-even: #152033;    /* Frozen column distinct shade */
+  --table-sticky-col-odd: #111827;
+  --table-sticky-col-hover: #1e3355;
+  --table-border: rgba(255, 255, 255, 0.08);
+  --table-sticky-border: rgba(255, 255, 255, 0.16);
+
+  --input-bg: #0b1120;
+  --input-border: rgba(255, 255, 255, 0.18);
+  --input-text: #f1f5f9;
+  --input-placeholder: #64748b;
+  --input-focus-border: #60a5fa;
+
+  --modal-bg: #131d2e;
+  --modal-header-bg: #0e1524;
+  --modal-footer-bg: #0e1524;
+  --modal-border: rgba(255, 255, 255, 0.14);
+  --modal-backdrop: rgba(3, 7, 18, 0.78);
+}
+
+/* Custom scrollbar styling for seamless dark/light presentation */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.35);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.55);
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.32);
+}

@@ -1,0 +1,17 @@
+# Archives and Binaries
+*.apk
+*.zip
+*.tar
+*.gz
+*.rar
+
+# Node & Build Outputs
+node_modules/
+build/
+dist/
+coverage/
+stats.html
+.DS_Store
+*.log
+.env*
+!.env.example

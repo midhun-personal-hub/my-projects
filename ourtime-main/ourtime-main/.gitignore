@@ -1,0 +1,45 @@
+# Android Build Artifacts & Binaries
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+*.zip
+*.tar
+*.gz
+*.rar
+
+# Android Studio & Gradle
+*.iml
+.gradle/
+/local.properties
+local.properties
+/.idea/
+.DS_Store
+/build/
+/app/build/
+/captures
+.externalNativeBuild
+.cxx
+
+# Secrets & Keystores
+*.jks
+*.keystore
+.env
+.env.local
+
+# VS Code
+.vscode/
+
+# Server
+server/node_modules/
+server/dist/
+server/.env
+
+# Old subdirectory
+watch_together_android_app-main/
+
+# OS
+Thumbs.db
+*.swp
+*~

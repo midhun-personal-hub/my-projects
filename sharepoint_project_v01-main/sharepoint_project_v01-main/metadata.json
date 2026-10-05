@@ -1,0 +1,6 @@
+{
+  "name": "sharepoint-management-platform",
+  "description": "SharePoint Management Platform SPA scaffolded with MSAL, Microsoft Graph client, Zustand, TanStack Query, and TanStack Table.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
