@@ -1,0 +1,6 @@
+{
+  "name": "Apex Fit - AI Fitness & Diet Tracker",
+  "description": "Mobile-first PWA fitness and diet tracker with multimodal food photo analysis, voice food logging, workout session tracking, and intelligent Gemini coaching.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

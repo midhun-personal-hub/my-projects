@@ -1,0 +1,18 @@
+# Dependencies & Outputs
+node_modules/
+build/
+dist/
+server.js
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+
+# Binaries & Archives
+*.zip
+*.apk
+*.aab
+*.tar
+*.gz
+*.rar
